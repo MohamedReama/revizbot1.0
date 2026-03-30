@@ -487,61 +487,53 @@ function QuizScreen({ config, onFinish, onBack }) {
 
   const generate = async () => {
     setPhase("loading"); setLoadErr("");
-    const diffDesc = difficulty<=3 ? "très simples, niveau débutant, définitions et formules basiques"
-      : difficulty<=6 ? "intermédiaires, applications numériques et raisonnements"
-      : "difficiles, problèmes complexes et cas avancés";
+    const subjectLabel = SUBJECT_NAMES[config.subject] || config.subject;
 
-    const sys = `Tu es un professeur de ${subjectLabel} expert. Génère exactement 10 questions QCM sur le chapitre "${config.chapter}" pour un élève de ${config.level}.
+    const sys = `Tu es un professeur de ${subjectLabel}. Génère 10 QCM sur le chapitre "${config.chapter}" niveau ${config.level}, difficulté ${difficulty}/10.
+RÈGLE: Réponds UNIQUEMENT avec du JSON brut, aucun texte avant ou après.
+Format obligatoire:
+{"questions":[{"q":"texte question","options":["choix1","choix2","choix3","choix4"],"answer":2,"explanation":"explication"}]}
+- answer = index 0,1,2 ou 3 de la bonne réponse (varie-les aléatoirement)
+- 4 options par question obligatoirement`;
 
-INSTRUCTIONS STRICTES:
-1. Réponds avec UNIQUEMENT du JSON valide, aucun texte avant ou après
-2. Format: {"questions":[{"q":"...","options":["...","...","...","..."],"answer":N,"explanation":"..."}]}
-3. "answer" = index entier (0, 1, 2, ou 3) de la bonne réponse
-4. IMPORTANT: Distribue les bonnes réponses aléatoirement - utilise 0, 1, 2 ET 3, pas toujours 0
-5. Questions de niveau ${difficulty}/10: ${diffDesc}
-6. Questions spécifiques au chapitre "${config.chapter}", avec exemples concrets`;
+    const tryParse = (raw) => {
+      const attempts = [
+        () => { const m = raw.match(/\{[\s\S]*"questions"[\s\S]*\}/); return m && JSON.parse(m[0]); },
+        () => { const s=raw.indexOf("{"); const e=raw.lastIndexOf("}"); return s>-1&&e>s&&JSON.parse(raw.slice(s,e+1)); },
+        () => JSON.parse(raw.replace(/\`\`\`json/gi,"").replace(/\`\`\`/g,"").trim()),
+      ];
+      for (const fn of attempts) { try { const r=fn(); if(r?.questions?.length>0) return r.questions; } catch {} }
+      return null;
+    };
 
-    const raw = await callAI(sys, `Génère maintenant les 10 questions QCM sur ${config.chapter} niveau ${difficulty}/10.`);
+    const fmt = (qs) => qs.slice(0,10).map((q,i) => ({
+      q: q.q || q.question || "Question " + (i+1),
+      options: Array.isArray(q.options)&&q.options.length===4 ? q.options : ["Option A","Option B","Option C","Option D"],
+      answer: typeof q.answer==="number"&&q.answer>=0&&q.answer<=3 ? q.answer : i%4,
+      explanation: q.explanation || q.explication || "Relis ton cours."
+    }));
 
+    let raw = await callAI(sys, "JSON:");
     if (raw.startsWith("Erreur")) { setLoadErr(raw); setPhase("intro"); return; }
+    let qs = tryParse(raw);
 
-    try {
-      const jsonMatch = raw.match(/\{[\s\S]*"questions"[\s\S]*\}/);
-      if (!jsonMatch) throw new Error("No JSON");
-      const parsed = JSON.parse(jsonMatch[0]);
-      const qs = (parsed.questions||[]).slice(0,10).map((q,i) => ({
-        q: q.q || q.question || `Question ${i+1}`,
-        options: Array.isArray(q.options)&&q.options.length===4 ? q.options : ["Option A","Option B","Option C","Option D"],
-        answer: (typeof q.answer==="number"&&q.answer>=0&&q.answer<=3) ? q.answer : i%4,
-        explanation: q.explanation || q.explication || "Relis ton cours."
-      }));
-      if (qs.length===0) throw new Error("Empty questions");
-      setQuestions(qs);
-    } catch(e) {
-      console.warn("Parse error:", e.message, raw.substring(0,300));
-      // Retry once with simpler prompt
-      const retryRaw = await callAI(
-        `Génère 10 questions QCM JSON sur ${config.chapter} pour ${config.level}. JSON uniquement: {"questions":[{"q":"question?","options":["A","B","C","D"],"answer":1,"explanation":"pourquoi"}]}`,
-        "Génère les questions."
+    if (!qs) {
+      raw = await callAI(
+        `JSON uniquement. 10 QCM sur "${config.chapter}" pour ${config.level}. Format: {"questions":[{"q":"?","options":["A","B","C","D"],"answer":1,"explanation":"..."}]}`,
+        "{"
       );
-      try {
-        const m = retryRaw.match(/\{[\s\S]*\}/);
-        const d = JSON.parse(m[0]);
-        setQuestions((d.questions||[]).map((q,i)=>({
-          q:q.q||`Question ${i+1}`,
-          options:Array.isArray(q.options)&&q.options.length===4?q.options:["Option A","Option B","Option C","Option D"],
-          answer:typeof q.answer==="number"?q.answer:i%4,
-          explanation:q.explanation||"Relis ton cours."
-        })));
-      } catch {
-        setLoadErr("La génération a échoué. Vérifie ta connexion et réessaie.");
-        setPhase("intro"); return;
-      }
+      qs = tryParse(raw);
     }
+
+    if (!qs || qs.length === 0) {
+      setLoadErr("Génération échouée sur ce chapitre. Réessaie ou change de chapitre.");
+      setPhase("intro"); return;
+    }
+
+    setQuestions(fmt(qs));
     setCurrent(0); setAnswers([]); setSelected(null); setConfirmed(false);
     setPhase("question");
   };
-
   const nextQuestion = () => {
     const newAnswers = [...answers, { selected, correct: questions[current].answer }];
     setAnswers(newAnswers);
